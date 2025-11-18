@@ -233,6 +233,9 @@ const api = {
     sales.push(sale);
     LS.set("lv_sales", sales);
     LS.set("lv_products", updatedProducts);
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event("lv:sales-change"));
+    }
 
     return sale;
   },
@@ -289,6 +292,7 @@ const tabsPublic = [
 const tabsAdmin = [
   { key: "dash", label: "Dashboard", icon: ChartBar },
   { key: "produtos", label: "Produtos", icon: ChefHat },
+  { key: "pedidos", label: "Pedidos", icon: ShoppingCart },
   { key: "vendas", label: "Vendas", icon: ReceiptText },
   { key: "usuarios", label: "Usuários", icon: Users },
   { key: "fechamento", label: "Fechamento", icon: Settings2 },
@@ -303,6 +307,11 @@ export default function App() {
   const [toast, setToast] = useState<{ type: "ok" | "err"; msg: string } | null>(null);
 
   useEffect(() => { seedOnce(); setMe(api.me()); }, []);
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3500);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   const logout = () => { api.logout(); setMe(null); setToast({ type: "ok", msg: "Sessão encerrada." }); };
 
@@ -605,6 +614,7 @@ const AdminArea: React.FC<{ me: User; tab: string; setTab: (t:string)=>void; not
           <motion.div key={tab} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 8 }}>
             {tab === "dash" && <Dashboard />}
             {tab === "produtos" && <Products notify={notify} />}
+            {tab === "pedidos" && <OrdersBoard />}
             {tab === "vendas" && <Sales notify={notify} />}
             {tab === "usuarios" && <UsersPage />}
             {tab === "fechamento" && <Closing notify={notify} />}
@@ -884,6 +894,164 @@ const Sales: React.FC<{ notify:(t:any)=>void }> = ({ notify }) => {
         </div>
         <div className="flex justify-end">
           <Button onClick={checkout} disabled={items.length===0}><CheckCircle2 size={16}/> Finalizar</Button>
+        </div>
+      </Card>
+    </div>
+  );
+};
+
+const OrdersBoard = () => {
+  type RangeFilter = "all" | "today" | "week";
+  const orderSort = (list: Sale[]) => [...list].sort((a, b) => new Date(b.issued_at).getTime() - new Date(a.issued_at).getTime());
+  const [orders, setOrders] = useState<Sale[]>(() => orderSort(LS.get<Sale[]>("lv_sales", [])));
+  const [search, setSearch] = useState("");
+  const [methodFilter, setMethodFilter] = useState<"all" | Sale["payment_method"]>("all");
+  const [range, setRange] = useState<RangeFilter>("all");
+
+  useEffect(() => {
+    const sync = () => setOrders(orderSort(LS.get<Sale[]>("lv_sales", [])));
+    sync();
+    if (typeof window !== "undefined") {
+      window.addEventListener("lv:sales-change", sync);
+      window.addEventListener("storage", sync);
+      return () => {
+        window.removeEventListener("lv:sales-change", sync);
+        window.removeEventListener("storage", sync);
+      };
+    }
+    return () => {};
+  }, []);
+
+  const productMap = useMemo(() => {
+    const map = new Map<number, string>();
+    LS.get<Product[]>("lv_products", []).forEach(p => map.set(p.id, p.name));
+    return map;
+  }, [orders]);
+
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const weekAgo = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 6);
+    d.setHours(0, 0, 0, 0);
+    return d.getTime();
+  })();
+
+  const totalsByMethod = orders.reduce((acc, order) => {
+    acc[order.payment_method] += order.total_cents;
+    return acc;
+  }, { pix: 0, card: 0, cash: 0 } as Record<Sale["payment_method"], number>);
+
+  const todayOrders = orders.filter(o => o.issued_at.slice(0,10) === todayKey);
+  const totalValue = orders.reduce((sum, o) => sum + o.total_cents, 0);
+  const todayValue = todayOrders.reduce((sum, o) => sum + o.total_cents, 0);
+  const avgTicket = orders.length ? Math.round(totalValue / orders.length) : 0;
+  const favoriteMethod = (Object.entries(totalsByMethod).sort((a,b)=>b[1]-a[1])[0]?.[0] ?? "pix") as Sale["payment_method"];
+
+  const methodLabels: Record<Sale["payment_method"], string> = { pix: "PIX", card: "Cartão", cash: "Dinheiro" };
+  const methodTone: Record<Sale["payment_method"], "ok" | "warn" | "danger"> = { pix: "ok", card: "warn", cash: "danger" };
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return orders.filter(order => {
+      const hasQuery = !q ||
+        order.receipt_code.toLowerCase().includes(q) ||
+        order.items.some(item => (productMap.get(item.product_id) || "").toLowerCase().includes(q));
+      const matchesMethod = methodFilter === "all" || order.payment_method === methodFilter;
+      const issuedAt = new Date(order.issued_at).getTime();
+      const matchesRange =
+        range === "all"
+          ? true
+          : range === "today"
+            ? order.issued_at.slice(0,10) === todayKey
+            : issuedAt >= weekAgo;
+      return hasQuery && matchesMethod && matchesRange;
+    });
+  }, [orders, productMap, search, methodFilter, range, todayKey, weekAgo]);
+
+  const rangeOptions: { key: RangeFilter; label: string }[] = [
+    { key: "all", label: "Todo período" },
+    { key: "today", label: "Hoje" },
+    { key: "week", label: "Últimos 7 dias" },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <div className="grid md:grid-cols-3 gap-4">
+        <StatCard title="Pedidos hoje" value={`${todayOrders.length}`} icon={ShoppingCart} />
+        <StatCard title="Faturamento hoje" value={fmtBRL(todayValue)} icon={ReceiptText} />
+        <StatCard title="Ticket médio" value={fmtBRL(avgTicket)} icon={ChartBar} />
+      </div>
+      <Card className="p-4 space-y-4">
+        <div className="grid md:grid-cols-3 gap-3 items-end">
+          <div className="md:col-span-2">
+            <label className="text-xs flex items-center gap-2 mb-1"><Search size={14}/>Buscar</label>
+            <Input placeholder="Código ou item do pedido" value={search} onChange={e=>setSearch(e.target.value)} />
+          </div>
+          <div>
+            <label className="text-xs">Pagamento</label>
+            <select className="w-full px-3 py-2 rounded-xl border border-amber-300 bg-white" value={methodFilter} onChange={e=>setMethodFilter(e.target.value as "all" | Sale["payment_method"])}>
+              <option value="all">Todos</option>
+              <option value="pix">PIX</option>
+              <option value="card">Cartão</option>
+              <option value="cash">Dinheiro</option>
+            </select>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2 text-xs">
+          {rangeOptions.map(opt => (
+            <button
+              type="button"
+              key={opt.key}
+              onClick={() => setRange(opt.key)}
+              className={`px-3 py-1 rounded-full border transition ${range===opt.key ? "bg-amber-600 text-white border-amber-600" : "border-amber-200 text-amber-800"}`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+        <div className="space-y-3 max-h-[480px] overflow-auto pr-1">
+          {filtered.map(order => (
+            <div key={order.id} className="rounded-2xl border border-amber-200 bg-white p-3 space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="font-semibold">{order.receipt_code}</p>
+                  <p className="text-xs text-amber-700">
+                    #{order.id} · {new Date(order.issued_at).toLocaleDateString("pt-BR")} às {new Date(order.issued_at).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}
+                  </p>
+                </div>
+                <div className="text-right">
+                  <div className="text-lg font-bold">{fmtBRL(order.total_cents)}</div>
+                  <Badge tone={methodTone[order.payment_method]}>{methodLabels[order.payment_method]}</Badge>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2 text-xs text-amber-800">
+                {order.items.map(item => (
+                  <span key={`${order.id}-${item.product_id}-${item.id}`} className="px-2 py-1 rounded-xl border border-amber-100 bg-amber-50">
+                    {item.qty}x {productMap.get(item.product_id) || `Produto ${item.product_id}`} · {fmtBRL(item.unit_price_cents)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+          {filtered.length === 0 && (
+            <p className="text-sm text-amber-700">Nenhum pedido encontrado com os filtros atuais.</p>
+          )}
+        </div>
+      </Card>
+      <Card className="p-4">
+        <div className="flex flex-wrap items-center gap-4 text-sm">
+          <div>
+            <p className="text-xs text-amber-700">Pedidos registrados</p>
+            <p className="font-semibold">{orders.length}</p>
+          </div>
+          <div>
+            <p className="text-xs text-amber-700">Valor acumulado</p>
+            <p className="font-semibold">{fmtBRL(totalValue)}</p>
+          </div>
+          <div>
+            <p className="text-xs text-amber-700">Forma favorita</p>
+            <p className="font-semibold">{methodLabels[favoriteMethod]}</p>
+          </div>
         </div>
       </Card>
     </div>
